@@ -1,36 +1,57 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
-	"sort"
 	"sync"
+
+	_ "github.com/lib/pq"
 )
 
 type Storage struct {
-	m        sync.Mutex
-	lastID   int
-	allTasks map[int]Task
+	db *sql.DB
+	m  sync.Mutex
 }
 
-func NewStorage() *Storage {
-	return &Storage{
-		allTasks: make(map[int]Task),
+func NewStorage(connString string) (*Storage, error) {
+	db, err := sql.Open("postgres", connString)
+	if err != nil {
+		return nil, fmt.Errorf("opening database: %w", err)
 	}
+
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("pinging database: %w", err)
+	}
+
+	return &Storage{db: db}, nil
 }
 
 func (s *Storage) GetAllTasks() []Task {
 	s.m.Lock()
 	defer s.m.Unlock()
 
-	var tasks = make([]Task, 0, len(s.allTasks))
+	rows, err := s.db.Query("SELECT id, title, done FROM tasks")
+	if err != nil {
+		fmt.Printf("Failed to get all tasks: %v\n", err)
+		return nil
+	}
+	defer rows.Close()
 
-	for _, t := range s.allTasks {
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		err := rows.Scan(&t.ID, &t.Title, &t.Done)
+		if err != nil {
+			fmt.Printf("Failed to scan row: %v\n", err)
+			return nil
+		}
 		tasks = append(tasks, t)
 	}
 
-	sort.Slice(tasks, func(i, j int) bool {
-		return tasks[i].ID < tasks[j].ID
-	})
+	if err = rows.Err(); err != nil {
+		fmt.Printf("Row iteration error: %v\n", err)
+		return nil
+	}
 
 	return tasks
 }
@@ -39,11 +60,15 @@ func (s *Storage) CreateOneTask(t Task) int {
 	s.m.Lock()
 	defer s.m.Unlock()
 
-	fmt.Println("Trying to create task")
-	t.ID = s.lastID + 1
-	s.allTasks[t.ID] = t
-	s.lastID++
-	fmt.Printf("Created task. Last ID: %v\n", s.lastID)
+	var id int
+	err := s.db.QueryRow("INSERT INTO tasks (title, done) VALUES ($1, $2) RETURNING id", t.Title, t.Done).Scan(&id)
+	if err != nil {
+		fmt.Printf("Failed to insert task: %v\n", err)
+		return 0
+	}
+	t.ID = id
+
+	fmt.Printf("Created task. Last ID: %v\n", t.ID)
 	return t.ID
 }
 
@@ -51,32 +76,53 @@ func (s *Storage) UpdateTask(t Task) bool {
 	s.m.Lock()
 	defer s.m.Unlock()
 
-	_, ok := s.allTasks[t.ID]
-	if !ok {
+	res, err := s.db.Exec("UPDATE tasks SET title = $1, done = $2 WHERE id = $3", t.Title, t.Done, t.ID)
+	if err != nil {
+		fmt.Printf("Failed to update task: %v\n", err)
 		return false
 	}
 
-	s.allTasks[t.ID] = t
-	return true
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		fmt.Printf("Failed to get rows affected: %v\n", err)
+		return false
+	}
+
+	return rowsAffected > 0
 }
 
 func (s *Storage) GetTaskByID(id int) (Task, bool) {
 	s.m.Lock()
 	defer s.m.Unlock()
 
-	task, ok := s.allTasks[id]
-	return task, ok
+	var t Task
+	err := s.db.QueryRow("SELECT id, title, done FROM tasks WHERE id = $1", id).Scan(&t.ID, &t.Title, &t.Done)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return Task{}, false
+		}
+		fmt.Printf("Failed to get task by ID: %v\n", err)
+		return Task{}, false
+	}
+
+	return t, true
 }
 
 func (s *Storage) DeleteTaskByID(id int) bool {
 	s.m.Lock()
 	defer s.m.Unlock()
 
-	_, ok := s.allTasks[id]
-	if !ok {
+	res, err := s.db.Exec("DELETE FROM tasks WHERE id = $1", id)
+	if err != nil {
+		fmt.Printf("Failed to delete task: %v\n", err)
 		return false
 	}
 
-	delete(s.allTasks, id)
-	return true
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		fmt.Printf("Failed to get rows affected: %v\n", err)
+		return false
+	}
+
+	return rowsAffected > 0
 }

@@ -4,24 +4,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
+
+	"github.com/gorilla/mux"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
-	mux := http.NewServeMux()
+	mux := mux.NewRouter()
 
-	s := NewStorage()
-
-	tasks := TaskResource{
-		s: s,
+	connStr := os.Getenv("POSTGRES_CONN_STR")
+	storage, err := NewStorage(connStr)
+	if err != nil {
+		log.Fatal().Msgf("Failed to create storage: %v", err)
 	}
 
-	mux.HandleFunc("GET /tasks", tasks.GetAll)
-	mux.HandleFunc("POST /tasks/add", tasks.CreateOne)
+	tasks := TaskResource{
+		s: storage,
+	}
 
-	//обовʼязково передати id
-	mux.HandleFunc("PUT /tasks/update", tasks.UpdateOne)
-	mux.HandleFunc("DELETE /tasks/delete", tasks.DeleteOne)
+	mux.HandleFunc("/tasks", tasks.GetAll).Methods("GET")
+	mux.HandleFunc("/tasks/add", tasks.CreateOne).Methods("POST")
+	mux.HandleFunc("/tasks/update", tasks.UpdateOne).Methods("PUT")
+	mux.HandleFunc("/tasks/delete/{id:[0-9]+}", tasks.DeleteOne).Methods("DELETE")
 
 	fmt.Println("Server is running on port 8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
@@ -97,8 +103,8 @@ func (t *TaskResource) UpdateOne(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *TaskResource) DeleteOne(w http.ResponseWriter, r *http.Request) {
-
-	idStr := r.URL.Query().Get("id")
+	vars := mux.Vars(r)
+	idStr := vars["id"]
 	if idStr == "" {
 		http.Error(w, "ID is required", http.StatusBadRequest)
 		return
